@@ -7,10 +7,12 @@
  * @flow
  */
 
+import type {Thenable} from 'shared/ReactTypes';
 import type {Fiber} from 'react-reconciler/src/ReactInternalTypes';
 import type {FiberRoot} from 'react-reconciler/src/ReactInternalTypes';
 import type {Instance, TextInstance} from './ReactTestHostConfig';
 
+import * as React from 'react';
 import * as Scheduler from 'scheduler/unstable_mock';
 import {
   getPublicRootInstance,
@@ -19,7 +21,6 @@ import {
   flushSync,
   injectIntoDevTools,
   batchedUpdates,
-  act,
 } from 'react-reconciler/src/ReactFiberReconciler';
 import {findCurrentFiberUsingSlowPath} from 'react-reconciler/src/ReactFiberTreeReflection';
 import {
@@ -37,20 +38,32 @@ import {
   Profiler,
   MemoComponent,
   SimpleMemoComponent,
-  Block,
   IncompleteClassComponent,
   ScopeComponent,
 } from 'react-reconciler/src/ReactWorkTags';
 import invariant from 'shared/invariant';
-import getComponentName from 'shared/getComponentName';
+import isArray from 'shared/isArray';
+import getComponentNameFromType from 'shared/getComponentNameFromType';
 import ReactVersion from 'shared/ReactVersion';
 
 import {getPublicInstance} from './ReactTestHostConfig';
 import {ConcurrentRoot, LegacyRoot} from 'react-reconciler/src/ReactRootTags';
+import {allowConcurrentByDefault} from 'shared/ReactFeatureFlags';
+
+const act_notBatchedInLegacyMode = React.unstable_act;
+function act(callback: () => Thenable<mixed>): Thenable<void> {
+  return act_notBatchedInLegacyMode(() => {
+    return batchedUpdates(callback);
+  });
+}
+
+// TODO: Remove from public bundle
 
 type TestRendererOptions = {
   createNodeMock: (element: React$Element<any>) => any,
   unstable_isConcurrent: boolean,
+  unstable_strictMode: boolean,
+  unstable_concurrentUpdatesByDefault: boolean,
   ...
 };
 
@@ -152,7 +165,7 @@ function flatten(arr) {
     while (n.i < n.array.length) {
       const el = n.array[n.i];
       n.i += 1;
-      if (Array.isArray(el)) {
+      if (isArray(el)) {
         stack.push(n);
         stack.push({i: 0, array: el});
         break;
@@ -184,14 +197,6 @@ function toTree(node: ?Fiber) {
     case SimpleMemoComponent:
       return {
         nodeType: 'component',
-        type: node.type,
-        props: {...node.memoizedProps},
-        instance: null,
-        rendered: childrenToTree(node.child),
-      };
-    case Block:
-      return {
-        nodeType: 'block',
         type: node.type,
         props: {...node.memoizedProps},
         instance: null,
@@ -234,7 +239,6 @@ const validWrapperTypes = new Set([
   ForwardRef,
   MemoComponent,
   SimpleMemoComponent,
-  Block,
   // Normally skipped, but used when there's more than one root child.
   HostRoot,
 ]);
@@ -347,7 +351,7 @@ class ReactTestInstance {
   findByType(type: any): ReactTestInstance {
     return expectOne(
       this.findAllByType(type, {deep: false}),
-      `with node type: "${getComponentName(type) || 'Unknown'}"`,
+      `with node type: "${getComponentNameFromType(type) || 'Unknown'}"`,
     );
   }
 
@@ -437,12 +441,23 @@ function propsMatch(props: Object, filter: Object): boolean {
 function create(element: React$Element<any>, options: TestRendererOptions) {
   let createNodeMock = defaultTestOptions.createNodeMock;
   let isConcurrent = false;
+  let isStrictMode = false;
+  let concurrentUpdatesByDefault = null;
   if (typeof options === 'object' && options !== null) {
     if (typeof options.createNodeMock === 'function') {
       createNodeMock = options.createNodeMock;
     }
     if (options.unstable_isConcurrent === true) {
       isConcurrent = true;
+    }
+    if (options.unstable_strictMode === true) {
+      isStrictMode = true;
+    }
+    if (allowConcurrentByDefault) {
+      if (options.unstable_concurrentUpdatesByDefault !== undefined) {
+        concurrentUpdatesByDefault =
+          options.unstable_concurrentUpdatesByDefault;
+      }
     }
   }
   let container = {
@@ -455,6 +470,8 @@ function create(element: React$Element<any>, options: TestRendererOptions) {
     isConcurrent ? ConcurrentRoot : LegacyRoot,
     false,
     null,
+    isStrictMode,
+    concurrentUpdatesByDefault,
   );
   invariant(root != null, 'something went wrong');
   updateContainer(element, root, null, null);
